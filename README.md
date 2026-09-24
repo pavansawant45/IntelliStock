@@ -1,239 +1,226 @@
-# IntelliStock - AI Stock Predictor Platform
+# IntelliStock
 
-A comprehensive full-stack application for AI-powered stock market predictions and analysis.
+A full-stack stock analysis app. Search a stock, view its recent price history, and generate a 1 to 30 day prediction with a Buy / Hold / Sell recommendation, powered by an LSTM neural network and a news-sentiment score.
 
-## 🏗️ Architecture
+> **Attribution:** Originally created by Siddhant Sawant. Model rewrite (return-based LSTM, per-symbol models, hold-out evaluation), API client fixes, caching and dashboard fixes by Pavan Sawant.
 
-The project is organized into three main folders:
+> **Educational project.** Predictions are not financial advice. See [Model performance](#model-performance) for how well the model actually does.
 
-### 📁 client/
-React frontend application with modern UI/UX
-- **Framework**: React 18 with Vite
-- **Styling**: Tailwind CSS with custom design system
-- **Routing**: React Router DOM
-- **Charts**: Recharts for data visualization
-- **Animations**: Framer Motion
-- **State Management**: Context API
-- **Forms**: React Hook Form
-- **HTTP Client**: Axios
+---
 
-### 📁 server/
-Node.js backend API server
-- **Framework**: Express.js
-- **Database**: MongoDB with Mongoose ODM
-- **Authentication**: JWT with bcryptjs
-- **Security**: Helmet, CORS, Rate limiting
-- **Environment**: dotenv configuration
+## Architecture
 
-### 📁 ml-server/
-Python Flask server for AI predictions
-- **Framework**: Flask with Flask-CORS
-- **Data**: yfinance for real stock data
-- **Analysis**: pandas, numpy for data processing
-- **ML**: scikit-learn for predictions
-- **Technical Indicators**: RSI, MACD, Moving Averages
+Three independent services:
 
-## 🚀 Features
+```
+Browser (React, :3000)
+   -> Backend API (Node/Express, :5000) -> MongoDB
+        -> ML server (Python/Flask, :8000) -> Yahoo Finance
+```
 
-### Frontend Features
-- **Landing Page**: Engaging hero section with smooth animations
-- **Authentication**: Login/Register with form validation
-- **Dashboard**: Portfolio overview with interactive charts
-- **Stock Predictor**: Search stocks, generate AI predictions
-- **News Feed**: Market news with sentiment analysis
-- **Watchlist**: Track favorite stocks with predictions
-- **Admin Panel**: User management and analytics (admin only)
-- **Responsive Design**: Mobile-first approach with Tailwind CSS
+```
+IntelliStock/
+├── client/       React frontend
+├── server/       Node.js + Express API, MongoDB
+└── ml-server/    Flask service with the LSTM + sentiment model
+```
 
-### Backend Features
-- **User Management**: Registration, authentication, profiles
-- **Stock Data**: Search, historical data, predictions
-- **Watchlist**: Add/remove stocks, user preferences
-- **Admin Controls**: User management, system analytics
-- **Security**: JWT authentication, input validation, rate limiting
+Keeping the model in its own service means it can be changed or scaled without touching the website.
 
-### ML Server Features
-- **Stock Predictions**: 1-30 day price forecasts
-- **Technical Analysis**: RSI, MACD, Moving Averages
-- **Sentiment Analysis**: Market sentiment scoring
-- **Real Data**: Integration with Yahoo Finance API
-- **Multiple Models**: Technical, sentiment, and hybrid models
+## Tech stack
 
-## 🛠️ Setup Instructions
+| Layer | Technologies |
+|---|---|
+| Frontend | React 18, Vite, Tailwind CSS, React Router, Recharts, Framer Motion, Axios, React Hook Form, Context API |
+| Backend | Node.js, Express, MongoDB + Mongoose, JWT auth, bcryptjs, Helmet, CORS, rate limiting, `yahoo-finance2` |
+| ML server | Python, Flask, TensorFlow/Keras (LSTM), scikit-learn, pandas, NumPy, `yfinance`, VADER, TextBlob |
+| Data | Yahoo Finance (unofficial API) |
+
+## Features
+
+- Register / login with JWT authentication and hashed passwords
+- Stock search by symbol or company name
+- Historical price chart for the selected stock
+- Prediction for 1, 3, 5, 7 or 30 days with predicted price, confidence, recommendation and key factors
+- Technical indicators: RSI, MACD, 20/50/200-day moving averages, Bollinger Bands
+- Dashboard with stat cards, recent predictions and a watchlist table
+- Watchlist and headline-based news sentiment
+- Admin routes for user management (admin role)
+
+## How the prediction works
+
+1. Download about 2 years of daily prices for the symbol.
+2. Build features: daily log return, intraday range, overnight gap and volume change.
+3. Train an LSTM (30-day lookback, 48 units, then Dense 16 and Dense 1, Huber loss) to predict the **next-day return**, not the price.
+4. Split the data chronologically (80% train, 20% hold-out). The scaler is fit on training data only, so nothing leaks from the future.
+5. Roll the prediction forward for multi-day horizons. Each daily move is clamped to about 2 standard deviations of the stock's recent volatility (between 1% and 8%).
+6. Score recent news headlines with VADER and TextBlob. The resulting sentiment adjustment nudges the predicted price by at most ±2%.
+7. Convert to a recommendation from the predicted change:
+
+| Predicted change | Recommendation |
+|---|---|
+| above +3% | Strong Buy |
+| +1% to +3% | Buy |
+| -1% to +1% | Hold |
+| -3% to -1% | Sell |
+| below -3% | Strong Sell |
+
+Design choices worth knowing about:
+
+- **One model per symbol**, cached for 6 hours. Price data is cached for 10 minutes to avoid Yahoo rate limits.
+- **Confidence is measured, not fixed.** It is derived from the model's hold-out direction accuracy (range 40 to 80), then blended 65/35 with the sentiment confidence.
+- Predicting returns instead of prices keeps outputs realistic; an earlier version predicted absolute prices and produced impossible moves (for example -34% in one day).
+
+## Model performance
+
+The API response includes `directionalAccuracy` and `maeVsBaseline` (model error divided by the error of a "tomorrow equals today" baseline), so every prediction ships with its own evidence.
+
+In testing, hold-out direction accuracy was around **51%**, which is close to chance. This is expected: daily stock moves are mostly noise, and price history alone carries little signal. If `maeVsBaseline` is near or above 1.0, the model is not beating the naive baseline. Treat the output as a learning demo, not a trading signal.
+
+## Setup
 
 ### Prerequisites
-- Node.js 16+ and npm
-- Python 3.8+ and pip
-- MongoDB (local or cloud)
 
-### 1. Client Setup
-```bash
-cd client
-npm install
-npm run dev
-```
-The client will run on http://localhost:3000
+- Node.js **22+** (required by `yahoo-finance2` v4)
+- Python 3.10+ (tested on 3.13)
+- MongoDB (local install or MongoDB Atlas)
 
-### 2. Server Setup
-```bash
-cd server
-npm install
+### 1. ML server (port 8000)
 
-# Create .env file with:
-PORT=5000
-MONGODB_URI=mongodb://localhost:27017/intellistock
-JWT_SECRET=your-super-secret-jwt-key
-NODE_ENV=development
-ML_SERVER_URL=http://localhost:8000
-
-npm run dev
-```
-The server will run on http://localhost:5000
-
-### 3. ML Server Setup
 ```bash
 cd ml-server
-pip install -r requirements.txt
+python -m venv venv
 
-# Create .env file with:
+# Windows PowerShell
+venv\Scripts\Activate.ps1
+# macOS / Linux
+# source venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+Create `ml-server/.env`:
+
+```
 FLASK_ENV=development
 PORT=8000
+```
 
+Run:
+
+```bash
 python app.py
 ```
-The ML server will run on http://localhost:8000
 
-## 📊 API Endpoints
+The first prediction for a new symbol trains its model, which takes a few seconds. Later requests for that symbol are fast.
 
-### Authentication
-- `POST /api/auth/register` - User registration
-- `POST /api/auth/login` - User login
-- `GET /api/auth/me` - Get current user
+### 2. Backend (port 5000)
 
-### Stocks
-- `GET /api/stocks/:symbol` - Get stock data
-- `GET /api/stocks/search/:query` - Search stocks
-- `POST /api/stocks/predict` - Generate prediction
-- `GET /api/stocks/:symbol/history` - Historical data
-- `GET /api/stocks/news/:symbol?` - Market news
-
-### Users
-- `GET /api/users/profile` - User profile
-- `POST /api/users/watchlist` - Add to watchlist
-- `DELETE /api/users/watchlist/:symbol` - Remove from watchlist
-
-### Admin
-- `GET /api/admin/stats` - Dashboard statistics
-- `GET /api/admin/users` - All users
-- `PUT /api/admin/users/:id/status` - Update user status
-
-### ML Server
-- `POST /predict` - Generate stock prediction
-- `GET /sentiment/:symbol` - Sentiment analysis
-- `GET /technical/:symbol` - Technical analysis
-- `GET /models` - Available models
-
-## 🎨 Design System
-
-### Colors
-- **Primary**: Blue (#3B82F6) - Main brand color
-- **Secondary**: Purple (#8B5CF6) - Accent color
-- **Success**: Green (#10B981) - Positive indicators
-- **Warning**: Yellow (#F59E0B) - Neutral indicators
-- **Error**: Red (#EF4444) - Negative indicators
-- **Background**: Gray-900 (#111827) - Dark theme
-
-### Typography
-- **Font**: Inter (Google Fonts)
-- **Headings**: 600-700 weight
-- **Body**: 400-500 weight
-- **Scale**: Tailwind's default scale
-
-### Components
-- **Cards**: Rounded corners, subtle shadows
-- **Buttons**: Primary/secondary variants with hover states
-- **Forms**: Consistent styling with validation
-- **Charts**: Recharts with custom theming
-
-## 🔐 Security Features
-
-- JWT authentication with secure tokens
-- Password hashing with bcryptjs
-- Rate limiting to prevent abuse
-- Input validation and sanitization
-- CORS configuration
-- Helmet for security headers
-- Environment variable protection
-
-## 📱 Responsive Design
-
-- Mobile-first approach
-- Breakpoints: sm (640px), md (768px), lg (1024px), xl (1280px)
-- Flexible grid layouts
-- Touch-friendly interactions
-- Optimized for all screen sizes
-
-## 🧪 Demo Credentials
-
-### Admin Access
-- Email: admin@intellistock.com
-- Password: password123
-
-### Regular User
-- Email: user@example.com
-- Password: password123
-
-## 🚀 Deployment
-
-### Client (Netlify/Vercel)
-```bash
-cd client
-npm run build
-# Deploy dist/ folder
-```
-
-### Server (Heroku/Railway)
 ```bash
 cd server
-# Set environment variables
-# Deploy with npm start
+npm install
 ```
 
-### ML Server (Railway/Render)
+Create `server/.env`:
+
+```
+PORT=5000
+MONGODB_URI=mongodb://localhost:27017/intellistock
+JWT_SECRET=replace-with-a-long-random-string
+NODE_ENV=development
+ML_SERVER_URL=http://127.0.0.1:8000
+```
+
+Run:
+
 ```bash
-cd ml-server
-# Set environment variables
-# Deploy with python app.py
+npm run dev
 ```
 
-## 📈 Future Enhancements
+### 3. Frontend (port 3000)
 
-- Real-time stock data streaming
-- Advanced ML models (LSTM, Transformer)
-- Social trading features
-- Mobile app development
-- Advanced portfolio analytics
-- Options and crypto support
-- Paper trading simulation
-- Advanced charting tools
+```bash
+cd client
+npm install
+npm run dev
+```
 
-## 🤝 Contributing
+Open http://localhost:3000, register an account, then use the Predictor page.
 
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to branch (`git push origin feature/AmazingFeature`)
-5. Open Pull Request
+> Run the frontend from `client/`. Running Vite from the repo root skips the Tailwind config and the page loads unstyled.
 
-## 📄 License
+Never commit `.env` files. They are ignored by `.gitignore`.
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+## API endpoints
 
-## 🙏 Acknowledgments
+### Auth
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `GET /api/auth/me`
 
-- Yahoo Finance for stock data
-- Tailwind CSS for styling framework
-- Recharts for data visualization
-- Framer Motion for animations
-- MongoDB for database
-- Flask for ML server framework
+### Stocks
+- `GET /api/stocks/:symbol`
+- `GET /api/stocks/search/:query`
+- `GET /api/stocks/:symbol/history`
+- `POST /api/stocks/predict` with body `{ "symbol": "AAPL", "days": 1 }`
+- `GET /api/stocks/news/:symbol?`
+- `GET /api/stocks/news/watchlist`
+
+### Users
+- `GET /api/users/profile`
+- `GET /api/users/watchlist`
+- `POST /api/users/watchlist`
+- `DELETE /api/users/watchlist/:symbol`
+
+### Admin
+- `GET /api/admin/stats`
+- `GET /api/admin/users`
+- `PUT /api/admin/users/:id/status`
+
+### ML server
+- `POST /predict`
+- `GET /sentiment/:symbol`
+- `GET /technical/:symbol`
+- `GET /models`
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| Page loads as unstyled text | Frontend was started from the repo root. Run it from `client/`. |
+| `ModuleNotFoundError` (tensorflow, vaderSentiment, textblob) | Run `pip install -r requirements.txt` inside the activated venv. |
+| Stock search returns 500 | Check the backend terminal. Make sure `npm install` was run in `server/` (it needs `p-retry@4` and `yahoo-finance2` v4 on Node 22+). |
+| "Too Many Requests" | Yahoo is rate limiting your IP. Wait a while and avoid rapid repeated requests. Use `yfinance` 1.x (already pinned). |
+| "ML prediction service is currently unavailable" | The ML server is not running, or a first-time model training exceeded the backend timeout. Check the ML terminal. |
+| Blank dashboard | Hard refresh (Ctrl+Shift+R). The dashboard tolerates missing prediction fields. |
+
+## Known limitations
+
+- **Weak predictive power.** See [Model performance](#model-performance).
+- **Yahoo Finance is unofficial** and can rate-limit or change without notice.
+- **The dashboard "Portfolio Value" is the sum of watchlist prices**, not real holdings, and its 7-day chart line is placeholder data.
+- **Prices always show a `$`**, even for stocks quoted in other currencies (for example `.NS` or `.KS` tickers).
+- **The general news feed is sample data.** Watchlist news comes from Yahoo Finance headlines with keyword-based sentiment.
+- No automated tests yet.
+
+## Roadmap
+
+- Walk-forward backtesting across many time windows instead of a single split
+- More inputs such as earnings dates and market index moves
+- Track live accuracy over time and show it in the app
+- Real holdings for the portfolio view, with per-stock currency
+- Automated tests and a deployment setup
+
+## Deployment notes
+
+- **Client:** `cd client && npm run build`, then deploy `dist/` (Netlify or Vercel).
+- **Server:** set the `.env` values as environment variables (Railway, Render, etc.).
+- **ML server:** needs enough memory for TensorFlow. On Linux hosts, `tensorflow-cpu` is a lighter alternative to `tensorflow` in `requirements.txt`. Use `gunicorn app:app` (gunicorn does not run on Windows).
+
+## Acknowledgments
+
+Yahoo Finance for data, and the Tailwind CSS, Recharts, Framer Motion, MongoDB, Flask and TensorFlow projects.
+
+## Author
+
+Pavan Sawant, [github.com/pavansawant45](https://github.com/pavansawant45)
