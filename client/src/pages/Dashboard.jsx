@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import {
   TrendingUp,
-  TrendingDown,
   DollarSign,
   BarChart3,
   Star,
@@ -12,6 +11,25 @@ import {
 import axios from 'axios'
 import StockChart from '../components/Charts/StockChart'
 import { useAuth } from '../contexts/AuthContext'
+
+// Returns Tailwind classes for a prediction badge. Safe for undefined/null and
+// works whether the ML server sends "Buy", "BUY", "Strong Buy", "Sell", etc.
+const getPredictionClasses = (prediction) => {
+  const value = String(prediction ?? '').toLowerCase()
+  if (value.includes('buy')) return 'bg-green-900 text-green-300'
+  if (value.includes('sell')) return 'bg-red-900 text-red-300'
+  return 'bg-yellow-900 text-yellow-300'
+}
+
+const formatMoney = (value) => {
+  const num = Number(value)
+  return Number.isFinite(num) ? `$${num.toFixed(2)}` : 'N/A'
+}
+
+const formatConfidence = (value) => {
+  const num = Number(value)
+  return value != null && Number.isFinite(num) ? `${num}% confidence` : 'Confidence N/A'
+}
 
 const Dashboard = () => {
   const { user } = useAuth()
@@ -38,11 +56,12 @@ const Dashboard = () => {
         axios.get(`${API_URL}/api/users/watchlist`, { headers })
       ])
 
-      const userProfile = profileResponse.data
-      const watchlist = watchlistResponse.data
+      const userProfile = profileResponse.data || {}
+      const watchlist = Array.isArray(watchlistResponse.data) ? watchlistResponse.data : []
+      const predictions = Array.isArray(userProfile.predictions) ? userProfile.predictions : []
 
       const watchlistCount = watchlist.length
-      const predictionsCount = userProfile.predictions?.length || 0
+      const predictionsCount = predictions.length
 
       let portfolioValue = 0
       if (watchlist.length > 0) {
@@ -50,14 +69,15 @@ const Dashboard = () => {
       }
 
       const previousPortfolioValue = watchlist.reduce((sum, stock) => {
-        const previousPrice = stock.price - (stock.change || 0)
+        const previousPrice = (stock.price || 0) - (stock.change || 0)
         return sum + previousPrice
       }, 0)
 
       const portfolioChange = portfolioValue - previousPortfolioValue
-      const portfolioChangePercent = previousPortfolioValue > 0
-        ? ((portfolioChange / previousPortfolioValue) * 100).toFixed(1)
-        : 0
+      const portfolioChangePercent =
+        previousPortfolioValue > 0
+          ? Number(((portfolioChange / previousPortfolioValue) * 100).toFixed(1))
+          : 0
 
       const last7Days = []
       for (let i = 6; i >= 0; i--) {
@@ -70,15 +90,16 @@ const Dashboard = () => {
       setPortfolioData(last7Days)
       setWatchlistData(watchlist)
 
-      const recentPreds = userProfile.predictions
-        ?.slice(-4)
+      // Every field is normalised here so the render code never sees undefined
+      const recentPreds = predictions
+        .slice(-4)
         .reverse()
-        .map(p => ({
-          stock: p.symbol,
-          prediction: p.prediction,
-          confidence: p.confidence,
-          target: `$${p.targetPrice?.toFixed(2) || '0.00'}`
-        })) || []
+        .map((p) => ({
+          stock: p?.symbol || 'N/A',
+          prediction: p?.prediction || 'N/A',
+          confidence: p?.confidence ?? null,
+          target: formatMoney(p?.targetPrice)
+        }))
 
       setRecentPredictions(recentPreds)
 
@@ -92,7 +113,7 @@ const Dashboard = () => {
         },
         {
           title: 'Total Gain/Loss',
-          value: `${portfolioChange >= 0 ? '+' : ''}$${Math.abs(portfolioChange).toFixed(2)}`,
+          value: `${portfolioChange >= 0 ? '+' : '-'}$${Math.abs(portfolioChange).toFixed(2)}`,
           change: `${portfolioChangePercent >= 0 ? '+' : ''}${portfolioChangePercent}%`,
           changeType: portfolioChange >= 0 ? 'positive' : 'negative',
           icon: TrendingUp
@@ -158,9 +179,11 @@ const Dashboard = () => {
                         ) : (
                           <ArrowDownRight className="h-4 w-4 text-red-400 mr-1" />
                         )}
-                        <span className={`text-sm ${
-                          stat.changeType === 'positive' ? 'text-green-400' : 'text-red-400'
-                        }`}>
+                        <span
+                          className={`text-sm ${
+                            stat.changeType === 'positive' ? 'text-green-400' : 'text-red-400'
+                          }`}
+                        >
                           {stat.change}
                         </span>
                       </div>
@@ -181,9 +204,9 @@ const Dashboard = () => {
               animate={{ opacity: 1, x: 0 }}
               transition={{ duration: 0.8, delay: 0.2 }}
             >
-              <StockChart 
-                data={portfolioData} 
-                title="Portfolio Performance" 
+              <StockChart
+                data={portfolioData}
+                title="Portfolio Performance"
                 color="#10b981"
               />
             </motion.div>
@@ -206,20 +229,25 @@ const Dashboard = () => {
               ) : (
                 <div className="space-y-4">
                   {recentPredictions.map((item, index) => (
-                    <div key={index} className="flex items-center justify-between p-3 bg-gray-700 rounded-lg">
+                    <div
+                      key={index}
+                      className="flex items-center justify-between p-3 bg-gray-700 rounded-lg"
+                    >
                       <div className="flex items-center space-x-3">
                         <div className="font-semibold text-white">{item.stock}</div>
-                        <div className={`px-2 py-1 rounded text-xs font-medium ${
-                          item.prediction.includes('Buy') ? 'bg-green-900 text-green-300' :
-                          item.prediction.includes('Sell') ? 'bg-red-900 text-red-300' :
-                          'bg-yellow-900 text-yellow-300'
-                        }`}>
+                        <div
+                          className={`px-2 py-1 rounded text-xs font-medium ${getPredictionClasses(
+                            item.prediction
+                          )}`}
+                        >
                           {item.prediction}
                         </div>
                       </div>
                       <div className="text-right">
                         <div className="text-white font-medium">{item.target}</div>
-                        <div className="text-gray-400 text-sm">{item.confidence}% confidence</div>
+                        <div className="text-gray-400 text-sm">
+                          {formatConfidence(item.confidence)}
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -258,15 +286,30 @@ const Dashboard = () => {
                   </thead>
                   <tbody>
                     {watchlistData.map((stock, index) => (
-                      <tr key={index} className="border-b border-gray-700 hover:bg-gray-800 transition-colors">
+                      <tr
+                        key={stock.symbol || index}
+                        className="border-b border-gray-700 hover:bg-gray-800 transition-colors"
+                      >
                         <td className="py-3 font-semibold text-white">{stock.symbol}</td>
                         <td className="py-3 text-gray-300">{stock.name}</td>
-                        <td className="py-3 text-right text-white">${stock.price?.toFixed(2) || '0.00'}</td>
-                        <td className={`py-3 text-right ${stock.change >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          {stock.change >= 0 ? '+' : ''}{stock.change?.toFixed(2) || '0.00'}
+                        <td className="py-3 text-right text-white">
+                          ${stock.price?.toFixed(2) || '0.00'}
                         </td>
-                        <td className={`py-3 text-right ${stock.changePercent >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          {stock.changePercent >= 0 ? '+' : ''}{stock.changePercent?.toFixed(2) || '0.00'}%
+                        <td
+                          className={`py-3 text-right ${
+                            stock.change >= 0 ? 'text-green-400' : 'text-red-400'
+                          }`}
+                        >
+                          {stock.change >= 0 ? '+' : ''}
+                          {stock.change?.toFixed(2) || '0.00'}
+                        </td>
+                        <td
+                          className={`py-3 text-right ${
+                            stock.changePercent >= 0 ? 'text-green-400' : 'text-red-400'
+                          }`}
+                        >
+                          {stock.changePercent >= 0 ? '+' : ''}
+                          {stock.changePercent?.toFixed(2) || '0.00'}%
                         </td>
                       </tr>
                     ))}

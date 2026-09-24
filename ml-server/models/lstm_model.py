@@ -1,128 +1,152 @@
 import numpy as np
 import pandas as pd
 from tensorflow import keras
-from keras.models import Sequential
-from keras.layers import LSTM, Dense, Dropout, BatchNormalization
-from keras.callbacks import EarlyStopping
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 import warnings
 warnings.filterwarnings('ignore')
 
+
 class LSTMStockPredictor:
-    def __init__(self, lookback=60, epochs=50, batch_size=32):
+    """
+    Predicts the next-day *log return* (not the absolute price).
+
+    Why: absolute prices trend and leave the range the scaler saw during
+    training, which produces wild outputs (e.g. -34% in one day). Returns are
+    roughly stationary, so the network stays in a sensible range.
+
+    One instance = one symbol. Create a new instance per symbol.
+    """
+
+    def __init__(self, lookback=30, epochs=30, batch_size=32):
         self.lookback = lookback
         self.epochs = epochs
         self.batch_size = batch_size
         self.model = None
-        self.scaler = MinMaxScaler(feature_range=(0, 1))
+        self.scaler = StandardScaler()
+        self.metrics = {}
+        self.daily_vol = None
 
-    def prepare_data(self, data, target_col='Close'):
-        if len(data) < self.lookback + 1:
-            raise ValueError(f"Insufficient data. Need at least {self.lookback + 1} data points.")
+    # ---------- data ----------
+    @staticmethod
+    def build_features(data):
+        close = data['Close']
+        df = pd.DataFrame(index=data.index)
+        df['ret'] = np.log(close / close.shift(1))                      # target column (index 0)
+        df['range'] = (data['High'] - data['Low']) / close              # intraday range
+        df['gap'] = np.log(data['Open'] / close.shift(1))               # overnight gap
+        volume = data['Volume'].replace(0, np.nan)
+        df['vol_chg'] = np.log(volume / volume.shift(1)).clip(-1, 1).fillna(0)
+        return df.replace([np.inf, -np.inf], np.nan).dropna()
 
-        features = ['Open', 'High', 'Low', 'Close', 'Volume']
-        data_features = data[features].values
-
-        scaled_data = self.scaler.fit_transform(data_features)
-
+    def _make_sequences(self, scaled):
         X, y = [], []
-        for i in range(self.lookback, len(scaled_data)):
-            X.append(scaled_data[i-self.lookback:i])
-            y.append(scaled_data[i, 3])
+        for i in range(self.lookback, len(scaled)):
+            X.append(scaled[i - self.lookback:i])
+            y.append(scaled[i, 0])
+        return np.array(X), np.array(y)
 
-        X, y = np.array(X), np.array(y)
+    # ---------- model ----------
+    def build_model(self, input_shape):
+        model = keras.Sequential([
+            keras.layers.Input(shape=input_shape),
+            keras.layers.LSTM(48),
+            keras.layers.Dropout(0.2),
+            keras.layers.Dense(16, activation='relu'),
+            keras.layers.Dense(1)
+        ])
+        model.compile(optimizer=keras.optimizers.Adam(1e-3), loss=keras.losses.Huber())
+        return model
 
-        split = int(0.8 * len(X))
+    def fit(self, data):
+        df = self.build_features(data)
+        if len(df) < self.lookback + 60:
+            raise ValueError(f"Insufficient data. Need at least {self.lookback + 60} trading days.")
+
+        keras.utils.set_random_seed(42)
+
+        # Chronological split. The scaler only sees training rows (no leakage).
+        n_seq = len(df) - self.lookback
+        split = int(0.8 * n_seq)
+        train_end = split + self.lookback
+        self.scaler.fit(df.values[:train_end])
+        scaled = self.scaler.transform(df.values)
+
+        X, y = self._make_sequences(scaled)
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
 
-        return X_train, X_test, y_train, y_test, scaled_data
-
-    def build_model(self, input_shape):
-        model = Sequential([
-            LSTM(128, return_sequences=True, input_shape=input_shape),
-            Dropout(0.2),
-            BatchNormalization(),
-
-            LSTM(64, return_sequences=True),
-            Dropout(0.2),
-            BatchNormalization(),
-
-            LSTM(32, return_sequences=False),
-            Dropout(0.2),
-
-            Dense(32, activation='relu'),
-            Dense(16, activation='relu'),
-            Dense(1)
-        ])
-
-        model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
-        return model
-
-    def train(self, X_train, y_train, X_test, y_test):
         self.model = self.build_model((X_train.shape[1], X_train.shape[2]))
-
-        early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-
-        history = self.model.fit(
+        early_stop = keras.callbacks.EarlyStopping(
+            monitor='val_loss', patience=5, restore_best_weights=True
+        )
+        # validation_split takes the LAST 15% of the training data (still chronological);
+        # the test set is never used to pick weights.
+        self.model.fit(
             X_train, y_train,
             epochs=self.epochs,
             batch_size=self.batch_size,
-            validation_data=(X_test, y_test),
+            validation_split=0.15,
             callbacks=[early_stop],
             verbose=0
         )
 
-        return history
+        self._evaluate(X_test, y_test)
+        self.daily_vol = float(df['ret'].iloc[-60:].std())
+        return self
+
+    def _evaluate(self, X_test, y_test):
+        """Honest hold-out check: direction accuracy and error vs a 'no change' baseline."""
+        mean, scale = self.scaler.mean_[0], self.scaler.scale_[0]
+        pred = self.model.predict(X_test, verbose=0).ravel() * scale + mean
+        actual = y_test * scale + mean
+        self.metrics = {
+            'directional_accuracy': float(np.mean(np.sign(pred) == np.sign(actual))),
+            'mae': float(np.mean(np.abs(pred - actual))),
+            'baseline_mae': float(np.mean(np.abs(actual))),   # predicting 0% change
+            'test_samples': int(len(y_test))
+        }
+
+    # ---------- prediction ----------
+    def max_daily_move(self):
+        vol = self.daily_vol if self.daily_vol else 0.02
+        return float(np.clip(2.0 * vol, 0.01, 0.08))          # about 2 sigma, between 1% and 8%
 
     def predict_next_days(self, data, days=1):
         if self.model is None:
-            X_train, X_test, y_train, y_test, scaled_data = self.prepare_data(data)
-            self.train(X_train, y_train, X_test, y_test)
+            self.fit(data)
 
-        features = ['Open', 'High', 'Low', 'Close', 'Volume']
-        data_features = data[features].values
-        scaled_data = self.scaler.transform(data_features)
+        df = self.build_features(data)
+        scaled = self.scaler.transform(df.values)
+        seq = scaled[-self.lookback:].copy()
 
-        last_sequence = scaled_data[-self.lookback:]
-        predictions = []
-        current_sequence = last_sequence.copy()
+        mean, scale = self.scaler.mean_[0], self.scaler.scale_[0]
+        max_move = self.max_daily_move()
+        price = float(data['Close'].iloc[-1])
+        prices = []
 
         for _ in range(days):
-            current_batch = current_sequence.reshape((1, self.lookback, current_sequence.shape[1]))
-            predicted_price = self.model.predict(current_batch, verbose=0)[0, 0]
-            predictions.append(predicted_price)
+            batch = seq.reshape(1, self.lookback, seq.shape[1])
+            scaled_ret = self.model.predict(batch, verbose=0)[0, 0]
+            ret = float(np.clip(scaled_ret * scale + mean, -max_move, max_move))
 
-            new_row = current_sequence[-1].copy()
-            new_row[3] = predicted_price
-            current_sequence = np.vstack([current_sequence[1:], new_row])
+            price *= float(np.exp(ret))
+            prices.append(price)
 
-        dummy_array = np.zeros((len(predictions), 5))
-        dummy_array[:, 3] = predictions
-        predicted_prices = self.scaler.inverse_transform(dummy_array)[:, 3]
+            new_row = np.zeros(seq.shape[1])          # 0 in scaled space = training average
+            new_row[0] = (ret - mean) / scale
+            seq = np.vstack([seq[1:], new_row])
 
-        return predicted_prices
+        return np.array(prices)
 
     def calculate_confidence(self, data, predictions):
-        recent_volatility = data['Close'].pct_change().std()
+        """Confidence comes from hold-out accuracy, not from a fixed base of 75."""
+        confidence = 50.0
+        accuracy = self.metrics.get('directional_accuracy')
+        if accuracy is not None:
+            confidence += (accuracy - 0.5) * 100
 
-        if len(data) > 20:
-            recent_trend = data['Close'].iloc[-20:].pct_change().mean()
-        else:
-            recent_trend = data['Close'].pct_change().mean()
+        if self.daily_vol and self.daily_vol > 0.04:
+            confidence -= 10
+        confidence -= 2 * (len(predictions) - 1)
 
-        base_confidence = 75
-
-        if recent_volatility < 0.02:
-            base_confidence += 10
-        elif recent_volatility > 0.05:
-            base_confidence -= 15
-
-        if abs(recent_trend) < 0.001:
-            base_confidence += 5
-
-        prediction_change = (predictions[-1] - data['Close'].iloc[-1]) / data['Close'].iloc[-1]
-        if abs(prediction_change) > 0.1:
-            base_confidence -= 10
-
-        return max(60, min(95, base_confidence))
+        return round(float(np.clip(confidence, 40, 80)), 1)

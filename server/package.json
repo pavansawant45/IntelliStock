@@ -17,8 +17,8 @@
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.2",
-    "p-retry": "^7.1.0",
-    "yahoo-finance2": "^2.11.3"
+    "p-retry": "^4.6.2",
+    "yahoo-finance2": "^4.0.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

@@ -1,27 +1,49 @@
+import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
 from .lstm_model import LSTMStockPredictor
 from .sentiment_analyzer import SentimentAnalyzer
 import warnings
 warnings.filterwarnings('ignore')
 
+DATA_TTL = 10 * 60          # reuse downloaded prices for 10 minutes (avoids Yahoo rate limits)
+MODEL_TTL = 6 * 60 * 60     # reuse a trained model for 6 hours
+MAX_SENTIMENT_ADJUSTMENT = 0.02   # sentiment can nudge the price by at most +/-2%
+
+
 class HybridStockPredictor:
     def __init__(self):
-        self.lstm_model = LSTMStockPredictor(lookback=60, epochs=50, batch_size=32)
         self.sentiment_analyzer = SentimentAnalyzer()
         self.lstm_weight = 0.65
         self.sentiment_weight = 0.35
+        self._data_cache = {}     # symbol -> (timestamp, DataFrame)
+        self._model_cache = {}    # symbol -> (timestamp, LSTMStockPredictor)
 
     def get_stock_data(self, symbol, period='2y'):
+        key = (symbol, period)
+        cached = self._data_cache.get(key)
+        if cached and time.time() - cached[0] < DATA_TTL:
+            return cached[1].copy()
         try:
-            stock = yf.Ticker(symbol)
-            data = stock.history(period=period)
-            return data
+            data = yf.Ticker(symbol).history(period=period)
+            if data is None or data.empty:
+                return None
+            self._data_cache[key] = (time.time(), data)
+            return data.copy()
         except Exception as e:
             print(f"Error fetching data for {symbol}: {e}")
             return None
+
+    def get_lstm_model(self, symbol, data):
+        """One model PER SYMBOL. The old code shared one model (and one scaler) across all symbols."""
+        cached = self._model_cache.get(symbol)
+        if cached and time.time() - cached[0] < MODEL_TTL:
+            return cached[1]
+        model = LSTMStockPredictor(lookback=30, epochs=30, batch_size=32)
+        model.fit(data)
+        self._model_cache[symbol] = (time.time(), model)
+        return model
 
     def calculate_technical_indicators(self, data):
         if data is None or len(data) < 20:
@@ -65,9 +87,11 @@ class HybridStockPredictor:
 
             print("Running LSTM prediction...")
             try:
-                lstm_predictions = self.lstm_model.predict_next_days(data, days)
+                lstm_model = self.get_lstm_model(symbol, data)
+                lstm_predictions = lstm_model.predict_next_days(data, days)
                 lstm_predicted_price = float(lstm_predictions[-1])
-                lstm_confidence = self.lstm_model.calculate_confidence(data, lstm_predictions)
+                lstm_confidence = lstm_model.calculate_confidence(data, lstm_predictions)
+                backtest = lstm_model.metrics
             except Exception as e:
                 print(f"LSTM prediction error: {e}")
                 return {
@@ -78,6 +102,9 @@ class HybridStockPredictor:
             print("Running sentiment analysis...")
             sentiment_result = self.sentiment_analyzer.analyze_market_sentiment(symbol, data)
             sentiment_adjustment = self.sentiment_analyzer.get_sentiment_adjustment(sentiment_result['score'])
+            sentiment_adjustment = float(np.clip(
+                sentiment_adjustment, -MAX_SENTIMENT_ADJUSTMENT, MAX_SENTIMENT_ADJUSTMENT
+            ))
 
             hybrid_predicted_price = lstm_predicted_price * (1 + sentiment_adjustment)
 
@@ -117,6 +144,10 @@ class HybridStockPredictor:
                 f"LSTM model prediction: ${lstm_predicted_price:.2f}",
                 f"Sentiment adjustment: {sentiment_adjustment*100:+.2f}%",
             ]
+            if backtest.get('directional_accuracy') is not None:
+                factors.append(
+                    f"Hold-out direction accuracy: {backtest['directional_accuracy']*100:.0f}%"
+                )
             factors.extend(sentiment_result['factors'][:3])
 
             return {
@@ -135,7 +166,12 @@ class HybridStockPredictor:
                     'lstmConfidence': round(lstm_confidence, 2),
                     'sentimentScore': round(sentiment_result['score'], 3),
                     'sentimentConfidence': round(sentiment_result['confidence'], 2),
-                    'hybridWeight': f"{self.lstm_weight*100:.0f}% LSTM, {self.sentiment_weight*100:.0f}% Sentiment"
+                    'hybridWeight': f"{self.lstm_weight*100:.0f}% LSTM, {self.sentiment_weight*100:.0f}% Sentiment",
+                    'directionalAccuracy': round(backtest.get('directional_accuracy', 0), 3),
+                    'maeVsBaseline': (
+                        round(backtest['mae'] / backtest['baseline_mae'], 3)
+                        if backtest.get('baseline_mae') else None
+                    )
                 },
                 'technicalIndicators': {
                     'RSI': round(indicators.get('RSI', 50), 2),

@@ -150,7 +150,7 @@ router.get('/:symbol/history', auth, async (req, res) => {
     })
 
     const historicalData = chartData.quotes.map(item => ({
-      date: new Date(item.date * 1000).toISOString().split('T')[0],
+      date: new Date(item.date).toISOString().split('T')[0],
       value: item.close,
       open: item.open,
       high: item.high,

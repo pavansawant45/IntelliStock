@@ -16,6 +16,8 @@ const StockChart = ({ data, title, color = "#3b82f6" }) => {
             <YAxis 
               stroke="#9ca3af"
               fontSize={12}
+              domain={['auto', 'auto']}
+              tickFormatter={(value) => Math.round(value)}
             />
             <Tooltip 
               contentStyle={{
